@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: solana-quant-bot
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py --mode live
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: EXECUTION_MODE
+        value: live
