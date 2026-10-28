@@ -229,6 +229,8 @@ async def run_quant_engine(mode: str = "paper", duration_seconds: int = 600, rou
                         candidate_payload = {
                             "symbol": state["dex"],
                             "mint": mint,
+                            "buy_dex": b_label,
+                            "sell_dex": s_label,
                             "direction": direction_str,
                             "optimal_borrow_sol": borrow_sol,
                             "expected_net_sol": net_sol,
@@ -300,7 +302,7 @@ async def run_quant_engine(mode: str = "paper", duration_seconds: int = 600, rou
     sys.stdout.flush()
 
     # Save structured trade history
-    log_file = r"D:\THE FINAL ONE\trade_history_log.json"
+    log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_history_log.json")
     with open(log_file, "w", encoding="utf-8") as f:
         json.dump({
             "mode": mode,
@@ -314,18 +316,38 @@ async def run_quant_engine(mode: str = "paper", duration_seconds: int = 600, rou
     print(f"[*] Structured trade log saved to: {log_file}")
 
 
+def keep_alive_pinger():
+    """Render Free-Tier 24/7 Anti-Sleep Daemon: Pings public URL every 7 minutes."""
+    app_url = os.environ.get("RENDER_EXTERNAL_URL", "https://solana-quant-bot-7o19.onrender.com")
+    time.sleep(30)
+    while True:
+        try:
+            import requests
+            requests.get(app_url, timeout=10)
+        except Exception:
+            pass
+        time.sleep(420)
+
+
 def entry_point():
+    default_mode = os.environ.get("EXECUTION_MODE", "live")
+    is_render = bool(os.environ.get("RENDER"))
+
     parser = argparse.ArgumentParser(description="THE FINAL ONE : Solana Wall Street HFT Arbitrage Bot")
-    parser.add_argument("--mode", choices=["paper", "live"], default="paper", help="Execution mode (paper or live)")
-    parser.add_argument("--duration", type=int, default=600, help="Run duration in seconds (default: 600s = 10 mins)")
+    parser.add_argument("--mode", choices=["paper", "live"], default=default_mode, help="Execution mode (paper or live)")
+    parser.add_argument("--duration", type=int, default=None if is_render else 600, help="Run duration in seconds (None = 24/7 on Render)")
     parser.add_argument("--rounds", type=int, default=None, help="Optional cycle limit")
     parser.add_argument("--interval", type=float, default=0.4, help="Seconds between scan cycles")
-    parser.add_argument("--port", type=int, default=10000, help="Web dashboard status port")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 10000)), help="Web dashboard status port")
     args = parser.parse_args()
 
     # Start health/dashboard server in background
     health_thread = threading.Thread(target=start_health_server, args=(args.port,), daemon=True)
     health_thread.start()
+
+    # Start anti-sleep pinger daemon if on Render
+    pinger_thread = threading.Thread(target=keep_alive_pinger, daemon=True)
+    pinger_thread.start()
 
     try:
         asyncio.run(run_quant_engine(
