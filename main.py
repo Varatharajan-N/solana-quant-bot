@@ -38,15 +38,13 @@ print = custom_print
 from config import (
     RPC_URL,
     HELIUS_RPC_URL,
-    HELIUS_API_KEY,
     MIN_NET_PROFIT_SOL,
     SOL_INR_RATE
 )
 from radar import (
     get_live_surging_mints,
     check_freeze_authority_shield,
-    fetch_onchain_reserves,
-    inspect_dual_pools
+    fetch_direct_dual_reserves
 )
 from amm_math import evaluate_hft_arbitrage
 from executor import (
@@ -130,10 +128,10 @@ def print_banner(mode: str, wallet_pubkey: str, balance: float, ping_ms: float, 
     print("=" * 85)
     print("🏛️ DYNAMIC WALL STREET HFT QUANT BOT: THE FINAL ONE")
     print(f"[*] Dedicated Helius RPC : {HELIUS_RPC_URL[:48]}... [AUTHENTICATED | {ping_ms:.1f}ms]")
-    print(f"[*] Execution Mode       : {'🟢 LIVE ON-CHAIN BROADCAST (Jito + Kamino)' if mode == 'live' else '🟡 PAPER TRADING SIMULATION'}")
+    print(f"[*] Execution Mode       : {'🟢 LIVE ON-CHAIN BROADCAST (Helius SWQoS + Jito)' if mode == 'live' else '🟡 PAPER TRADING SIMULATION'}")
     print(f"[*] Signer Wallet        : {wallet_pubkey or 'None (Paper Simulation)'}")
     print(f"[*] Confirmed SOL Gas    : {balance:.4f} SOL")
-    print(f"[*] Target Strategy      : MORNING 5-FORMULA QUANT CORE (Zero Static Tokens)")
+    print(f"[*] Target Strategy      : MORNING 5-FORMULA QUANT CORE (Zero Jupiter Dependency)")
     print(f"[*] Sizing Strategy      : PURE AMM CALCULUS (Dynamic Delta x* Optimal Borrow)")
     print(f"[*] Safety Hurdle        : Net Profit >= +0.00015 SOL (>= +₹2.00 INR per trade)")
     if duration_seconds:
@@ -142,7 +140,7 @@ def print_banner(mode: str, wallet_pubkey: str, balance: float, ping_ms: float, 
     sys.stdout.flush()
 
 
-async def run_quant_engine(mode: str = "paper", duration_seconds: int = 600, rounds: int = None, interval: float = 0.4):
+async def run_quant_engine(mode: str = "live", duration_seconds: int = None, rounds: int = None, interval: float = 0.5):
     start_time = time.time()
     wallet = get_signer_wallet()
     wallet_pubkey = str(wallet.pubkey()) if wallet else ""
@@ -174,104 +172,95 @@ async def run_quant_engine(mode: str = "paper", duration_seconds: int = 600, rou
 
             try:
                 # Step 1: Discover dynamic live volume surges (Zero static coins)
-                surging_mints = await get_live_surging_mints(session, limit=20)
+                surging_mints = await get_live_surging_mints(session, limit=25)
                 if not surging_mints:
                     await asyncio.sleep(interval)
                     continue
 
-                for mint in surging_mints:
-                    # Freeze authority check
-                    is_safe = await check_freeze_authority_shield(session, mint)
-                    if not is_safe:
-                        blocked_sub_threshold += 1
-                        continue
+                # Step 2: Extract real pool reserves (xA, yA) vs (xB, yB) directly (Zero Jupiter)
+                dual_tokens = await fetch_direct_dual_reserves(session, surging_mints)
 
-                    # Probe live on-chain reserve & impact via Jupiter router
-                    state = await fetch_onchain_reserves(session, mint)
-                    if not state:
-                        await asyncio.sleep(0.15)
-                        continue
+                if dual_tokens:
+                    for (sym, addr), pools in dual_tokens.items():
+                        # Step 3: Before-calculation freeze shield (Happy Pasteur protection)
+                        is_safe = await check_freeze_authority_shield(session, addr)
+                        if not is_safe:
+                            blocked_sub_threshold += 1
+                            continue
 
-                    lat_ms = state["latency_ms"]
-                    out_tokens = state["out_amount"]
-                    dx_sol = 0.15
-                    impact = max(0.0001, state["price_impact_pct"] / 100.0)
+                        # Compare Pool 0 vs Pool 1
+                        p1 = pools[0]
+                        p2 = pools[1]
 
-                    # Dynamic reserve reconstruction
-                    est_sol_reserve_a = max(10.0, dx_sol / impact)
-                    est_token_reserve_a = max(1000.0, out_tokens / dx_sol * est_sol_reserve_a)
+                        # Step 4: The 5-Formula AMM Calculus Engine
+                        result, reason = evaluate_hft_arbitrage(
+                            p1["sol_res"], p1["base_res"],
+                            p2["sol_res"], p2["base_res"],
+                            delta_sol_swap=1.5,
+                            dex_a=p1["dex"],
+                            dex_b=p2["dex"]
+                        )
 
-                    # Dislocated market pair calculation (Morning 1.5% dislocation spread)
-                    sim_swap_sol = 2.5
-                    sim_token_reserve_b = est_token_reserve_a * 1.015
-                    sim_sol_reserve_b = est_sol_reserve_a
+                        if result:
+                            trade_num = len(executed_trades) + 1
+                            borrow_sol = result["borrow_sol"]
+                            net_sol = result["net_profit_sol"]
+                            net_inr = result["net_profit_inr"]
+                            spread = result["gross_spread_pct"]
 
-                    # Formula 1 to 5 Quant Engine
-                    result, reason = evaluate_hft_arbitrage(
-                        est_sol_reserve_a,
-                        est_token_reserve_a,
-                        sim_sol_reserve_b,
-                        sim_token_reserve_b,
-                        sim_swap_sol
-                    )
+                            direction_str = f"{result['buy_dex']} ──> {result['sell_dex']}"
 
-                    if result:
-                        trade_num = len(executed_trades) + 1
-                        borrow_sol = result["borrow_sol"]
-                        net_sol = result["net_profit_sol"]
-                        net_inr = result["net_profit_inr"]
-                        spread = result["gross_spread_pct"]
-
-                        b_label = result['buy_dex'] if result['buy_dex'].startswith('DEX_') else f"DEX_{result['buy_dex']}"
-                        s_label = result['sell_dex'] if result['sell_dex'].startswith('DEX_') else f"DEX_{result['sell_dex']}"
-                        direction_str = f"{b_label} ──> {s_label}"
-
-                        candidate_payload = {
-                            "symbol": state["dex"],
-                            "mint": mint,
-                            "buy_dex": b_label,
-                            "sell_dex": s_label,
-                            "direction": direction_str,
-                            "optimal_borrow_sol": borrow_sol,
-                            "expected_net_sol": net_sol,
-                            "spread_pct": spread
-                        }
-
-                        # Execute Trade
-                        exec_res = execute_arbitrage(candidate_payload, paper_mode=(mode == "paper"))
-
-                        if exec_res.get("status") in ["PAPER_SUCCESS", "LIVE_SUCCESS"]:
-                            total_net_sol += net_sol
-                            total_net_inr += net_inr
-
-                            trade_record = {
-                                "trade_id": trade_num,
-                                "timestamp": now_str,
-                                "mint": mint,
-                                "dex": state["dex"],
-                                "optimal_borrow_sol": round(borrow_sol, 4),
-                                "gross_spread_pct": round(spread, 2),
-                                "net_profit_sol": round(net_sol, 6),
-                                "net_profit_inr": round(net_inr, 2),
-                                "latency_ms": round(lat_ms, 1)
+                            candidate_payload = {
+                                "symbol": sym,
+                                "mint": addr,
+                                "buy_dex": result["buy_dex"],
+                                "sell_dex": result["sell_dex"],
+                                "direction": direction_str,
+                                "optimal_borrow_sol": borrow_sol,
+                                "expected_net_sol": net_sol,
+                                "net_profit_inr": net_inr,
+                                "spread_pct": spread
                             }
-                            executed_trades.append(trade_record)
 
-                            if mode == "paper":
-                                print(f"🔥 [{now_str}] PAPER TRADE #{trade_num}! Mint: {mint[:12]}... | Route: {direction_str}")
-                                print(f"   └── Optimal Borrow : {borrow_sol:.4f} SOL (~₹{borrow_sol * SOL_INR_RATE:.0f} INR)")
-                                print(f"   └── Gross Spread   : +{spread:.2f}% | Latency: {lat_ms:.1f}ms")
-                                print(f"   └── Net Profit     : +{net_sol:.6f} SOL (+₹{net_inr:.2f} INR) 🟢 PROFIT SECURED!")
+                            # Step 5: Execute Trade
+                            exec_res = execute_arbitrage(candidate_payload, paper_mode=(mode == "paper"))
+
+                            if exec_res.get("status") in ["PAPER_SUCCESS", "LIVE_SUCCESS"]:
+                                total_net_sol += net_sol
+                                total_net_inr += net_inr
+
+                                trade_record = {
+                                    "trade_id": trade_num,
+                                    "timestamp": now_str,
+                                    "symbol": sym,
+                                    "mint": addr,
+                                    "direction": direction_str,
+                                    "optimal_borrow_sol": round(borrow_sol, 4),
+                                    "gross_spread_pct": round(spread, 2),
+                                    "net_profit_sol": round(net_sol, 6),
+                                    "net_profit_inr": round(net_inr, 2),
+                                    "tx_signature": exec_res.get("tx_signature", "N/A"),
+                                    "solscan_url": exec_res.get("solscan_url", "N/A")
+                                }
+                                executed_trades.append(trade_record)
+
+                                if mode == "paper":
+                                    print(f"🔥 [{now_str}] PAPER TRADE #{trade_num}! [{sym}] ({addr[:8]}...) | Route: {direction_str}")
+                                    print(f"   └── Optimal Borrow : {borrow_sol:.4f} SOL (~₹{borrow_sol * SOL_INR_RATE:.0f} INR)")
+                                    print(f"   └── Gross Spread   : +{spread:.2f}% | Expected Net: +{net_sol:.6f} SOL (+₹{net_inr:.2f} INR) 🟢 PROFIT SECURED!")
+                                else:
+                                    print_execution_card(exec_res)
+
+                                sys.stdout.flush()
                             else:
-                                print_execution_card(exec_res)
-
-                            sys.stdout.flush()
+                                blocked_sub_threshold += 1
                         else:
                             blocked_sub_threshold += 1
-                    else:
-                        blocked_sub_threshold += 1
 
-                    await asyncio.sleep(0.3)
+                # Live speed & telemetry heartbeat
+                active_pools_count = len(dual_tokens) if dual_tokens else 0
+                print(f"[{now_str}] ⚡ Dynamic Scan #{cycle} | Active Pairs: {active_pools_count} | Gas: {balance:.4f} SOL | Trades Won: {len(executed_trades)} | Net PnL: +{total_net_sol:.6f} SOL (+₹{total_net_inr:.2f} INR)")
+                sys.stdout.flush()
 
                 # Termination check
                 if rounds and cycle >= rounds:
@@ -337,7 +326,7 @@ def entry_point():
     parser.add_argument("--mode", choices=["paper", "live"], default=default_mode, help="Execution mode (paper or live)")
     parser.add_argument("--duration", type=int, default=None if is_render else 600, help="Run duration in seconds (None = 24/7 on Render)")
     parser.add_argument("--rounds", type=int, default=None, help="Optional cycle limit")
-    parser.add_argument("--interval", type=float, default=0.4, help="Seconds between scan cycles")
+    parser.add_argument("--interval", type=float, default=0.5, help="Seconds between scan cycles")
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 10000)), help="Web dashboard status port")
     args = parser.parse_args()
 
