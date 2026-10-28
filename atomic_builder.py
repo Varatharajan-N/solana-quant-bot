@@ -10,7 +10,6 @@ from solders.transaction import VersionedTransaction
 from solders.address_lookup_table_account import AddressLookupTableAccount
 from solders.keypair import Keypair
 from solders.hash import Hash
-from spl.token.instructions import get_associated_token_address
 
 from config import (
     RPC_URL,
@@ -22,12 +21,22 @@ from config import (
     KAMINO_FEE_RECEIVER,
     SYSVAR_INSTRUCTIONS_ID,
     TOKEN_PROGRAM_ID,
+    ASSOCIATED_TOKEN_PROGRAM_ID,
     SOL_MINT,
     WSOL_STR,
     KAMINO_FLASH_BORROW_DISCRIMINATOR,
     KAMINO_FLASH_REPAY_DISCRIMINATOR,
     JITO_TIP_ACCOUNTS
 )
+
+
+def get_associated_token_address(wallet_address: Pubkey, token_mint_address: Pubkey) -> Pubkey:
+    """Pure Solders implementation of SPL Associated Token Address derivation."""
+    ata, _ = Pubkey.find_program_address(
+        [bytes(wallet_address), bytes(TOKEN_PROGRAM_ID), bytes(token_mint_address)],
+        ASSOCIATED_TOKEN_PROGRAM_ID
+    )
+    return ata
 
 ALT_CACHE = {}
 BUILDER_SESSION = requests.Session()
