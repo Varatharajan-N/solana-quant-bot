@@ -8,14 +8,14 @@ from config import GAMMA_1, GAMMA_2, PHI, MIN_NET_PROFIT_SOL, MIN_SPARK_SOL, SPA
 def evaluate_spark(delta_sol_swap: float, pool_sol_reserve: float) -> bool:
     """
     FORMULA 1: The Golden Spark Condition.
-    Guarantees swap is >= 1.5 SOL and shifts pool reserve by >= 1.0%.
+    Ensures minimum swap volume or dislocation threshold.
     """
     if pool_sol_reserve <= 0:
         return False
-    return (delta_sol_swap >= MIN_SPARK_SOL) and ((delta_sol_swap / pool_sol_reserve) >= SPARK_IMPACT_RATIO)
+    return (delta_sol_swap >= MIN_SPARK_SOL) or ((delta_sol_swap / pool_sol_reserve) >= SPARK_IMPACT_RATIO)
 
 
-def determine_directionality(xa: float, ya: float, xb: float, yb: float):
+def determine_directionality(xa: float, ya: float, xb: float, yb: float, dex_a: str = "DEX_A", dex_b: str = "DEX_B"):
     """
     FORMULA 2: In-Memory Cross-Product Directionality.
     Computes Left = xb * ya vs Right = xa * yb without floating point division.
@@ -28,10 +28,10 @@ def determine_directionality(xa: float, ya: float, xb: float, yb: float):
 
     if left > right:
         # DEX A is cheap (Buy on A), DEX B is expensive (Sell on B)
-        return xa, ya, xb, yb, "DEX_A", "DEX_B"
+        return xa, ya, xb, yb, dex_a, dex_b
     elif right > left:
         # DEX B is cheap (Buy on B), DEX A is expensive (Sell on A)
-        return xb, yb, xa, ya, "DEX_B", "DEX_A"
+        return xb, yb, xa, ya, dex_b, dex_a
     else:
         return None
 
@@ -43,18 +43,22 @@ def calculate_optimal_borrow(x1: float, y1: float, x2: float, y2: float) -> floa
     Returns:
         delta_x_star in SOL, or 0.0 if marginal profit is negative.
     """
-    # Numerator = sqrt((gamma1 * gamma2 * x1 * x2 * y1 * y2) / (1 + phi)) - (x1 * y2)
-    num_root = math.sqrt((GAMMA_1 * GAMMA_2 * x1 * x2 * y1 * y2) / (1.0 + PHI))
-    numerator = num_root - (x1 * y2)
+    try:
+        num_root = math.sqrt((GAMMA_1 * GAMMA_2 * x1 * x2 * y1 * y2) / (1.0 + PHI))
+        numerator = num_root - (x1 * y2)
 
-    if numerator <= 0:
-        return 0.0 # Spread cannot cover fees; zero-trade protection
+        if numerator <= 0:
+            return 0.0 # Spread cannot cover fees; zero-trade protection
 
-    denominator = GAMMA_1 * (y2 + (GAMMA_2 * y1))
-    delta_x_star = numerator / denominator
+        denominator = GAMMA_1 * (y2 + (GAMMA_2 * y1))
+        if denominator <= 0:
+            return 0.0
 
-    # Guardrails: Minimum 0.05 SOL to cover gas, Cap at 1.0 SOL for safety
-    return max(0.05, min(delta_x_star, 1.0))
+        delta_x_star = numerator / denominator
+        # Guardrails: Min 0.05 SOL, Cap at 1.5 SOL for safety
+        return max(0.05, min(delta_x_star, 1.5))
+    except Exception:
+        return 0.0
 
 
 def compute_expected_net_profit(x1: float, y1: float, x2: float, y2: float, delta_x: float):
@@ -77,7 +81,7 @@ def compute_expected_net_profit(x1: float, y1: float, x2: float, y2: float, delt
     return delta_x_prime, repay_sol, net_sol, net_inr
 
 
-def evaluate_hft_arbitrage(xa: float, ya: float, xb: float, yb: float, delta_sol_swap: float):
+def evaluate_hft_arbitrage(xa: float, ya: float, xb: float, yb: float, delta_sol_swap: float = 1.5, dex_a: str = "DEX_A", dex_b: str = "DEX_B"):
     """
     Full pipeline evaluator running in sub-microsecond CPU time.
     """
@@ -86,7 +90,7 @@ def evaluate_hft_arbitrage(xa: float, ya: float, xb: float, yb: float, delta_sol
         return None, "SPARK_SUB_THRESHOLD"
 
     # Step 2: Directionality
-    dir_res = determine_directionality(xa, ya, xb, yb)
+    dir_res = determine_directionality(xa, ya, xb, yb, dex_a, dex_b)
     if not dir_res:
         return None, "BALANCED_PARITY"
 
