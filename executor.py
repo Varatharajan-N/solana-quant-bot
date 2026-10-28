@@ -296,6 +296,8 @@ def execute_arbitrage(candidate: dict, paper_mode: bool = True) -> dict:
             amount_borrow_sol=optimal_borrow,
             token_mint=token_mint,
             recent_blockhash=recent_blockhash,
+            buy_dex=candidate.get("buy_dex"),
+            sell_dex=candidate.get("sell_dex"),
             tip_lamports=tip_lamports,
             tip_account=JITO_TIP_ACCOUNTS[0]
         )
