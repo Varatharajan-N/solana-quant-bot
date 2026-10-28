@@ -121,14 +121,21 @@ def fetch_jupiter_swap_instructions(quote_response: dict, user_pubkey: str) -> d
     return None
 
 
-def fetch_jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int):
-    """Fetches high-speed quote from Jupiter V6 Router."""
+def fetch_jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int, dex: str = None, exclude_dex: str = None):
+    """Fetches high-speed quote from Jupiter V6 Router with Cross-DEX routing support."""
     params = {
         "inputMint": input_mint,
         "outputMint": output_mint,
         "amount": str(amount_lamports),
         "slippageBps": 50
     }
+    if dex and ":" not in dex:
+        params["dexes"] = dex
+    if exclude_dex:
+        clean_ex = exclude_dex.split(":")[0].replace("DEX_", "")
+        if clean_ex:
+            params["excludeDexes"] = clean_ex
+
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         res = BUILDER_SESSION.get("https://api.jup.ag/swap/v1/quote", params=params, headers=headers, timeout=4.0)
@@ -145,6 +152,8 @@ def assemble_atomic_flash_transaction(
     amount_borrow_sol: float,
     token_mint: str,
     recent_blockhash: Hash,
+    buy_dex: str = None,
+    sell_dex: str = None,
     tip_lamports: int = 0,
     tip_account: str = None
 ) -> VersionedTransaction:
@@ -152,8 +161,8 @@ def assemble_atomic_flash_transaction(
     ASSEMBLES THE 1 SINGLE ATOMIC TRANSACTION:
     1. Compute Budget Limit & Priority Price
     2. Kamino Flash Loan Borrow
-    3. Leg 1 Swap (WSOL -> Token)
-    4. Leg 2 Swap (Token -> WSOL)
+    3. Leg 1 Swap (WSOL -> Token on Buy DEX)
+    4. Leg 2 Swap (Token -> WSOL on Sell DEX / Cross-DEX)
     5. Kamino Flash Loan Repay
     6. ATA Rent Refund (Close temporary account, refund rent to wallet)
     7. Atomic Zero-Loss Assertion
@@ -163,12 +172,16 @@ def assemble_atomic_flash_transaction(
     lamports_borrow = int(amount_borrow_sol * 1_000_000_000)
 
     # 1. Quote Leg 1 (SOL -> Token)
-    leg1_quote, tokens_bought = fetch_jupiter_quote(WSOL_STR, token_mint, lamports_borrow)
+    leg1_quote, tokens_bought = fetch_jupiter_quote(WSOL_STR, token_mint, lamports_borrow, dex=buy_dex)
+    if not leg1_quote or tokens_bought <= 0:
+        leg1_quote, tokens_bought = fetch_jupiter_quote(WSOL_STR, token_mint, lamports_borrow)
     if not leg1_quote or tokens_bought <= 0:
         raise Exception(f"Leg 1 route unavailable for {token_mint[:8]}...")
 
-    # 2. Quote Leg 2 (Token -> SOL)
-    leg2_quote, sol_out = fetch_jupiter_quote(token_mint, WSOL_STR, tokens_bought)
+    # 2. Quote Leg 2 (Token -> SOL Cross-DEX)
+    leg2_quote, sol_out = fetch_jupiter_quote(token_mint, WSOL_STR, tokens_bought, dex=sell_dex, exclude_dex=buy_dex)
+    if not leg2_quote or sol_out <= 0:
+        leg2_quote, sol_out = fetch_jupiter_quote(token_mint, WSOL_STR, tokens_bought, exclude_dex=buy_dex)
     if not leg2_quote or sol_out <= 0:
         raise Exception(f"Leg 2 route unavailable for {token_mint[:8]}...")
 
